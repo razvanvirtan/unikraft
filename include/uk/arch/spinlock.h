@@ -32,9 +32,9 @@ extern "C" {
 
 typedef struct {} spinlock_t;
 
-#ifdef CONFIG_SMP
-#error "Define your spinlock operations!"
-#else
+//#ifdef CONFIG_SMP
+//#error "Define your spinlock operations!"
+//#else
 
 #define ukarch_spin_lock_init(lock)      (void)(lock)
 #define ukarch_spin_is_locked(lock)      (void)(lock)
@@ -45,7 +45,7 @@ typedef struct {} spinlock_t;
 /* Defines a preinitialized spin_lock in unlocked state */
 #define DEFINE_SPINLOCK(lock)            spinlock_t lock = {}
 
-#endif
+//#endif
 
 #ifdef __cplusplus
 }
