@@ -361,6 +361,14 @@ void init_secondary(uint64_t cpu)
 
 	uk_pr_info("init secondary cpu=%lu\n", cpu);
 
+	/*
+	 * Set the pcpu pointer with a backup in tpidr_el1 to be
+	 * loaded when entering the kernel from userland.
+	 */
+	__asm __volatile(
+		"mov x18, %0\n"
+		"msr tpidr_el1, %0" :: "r"(pcpup));
+
 	/* Spin until the BSP releases the APs */
 	while (!aps_ready)
 		__asm __volatile("wfe");
@@ -441,6 +449,16 @@ void _libkvmplat_start(void *dtb_pointer)
 	 */
 	uk_pr_info("Switch from bootstrap stack to stack @%p\n",
 		   (void *) _libkvmplat_cfg.bstack.end);
+
+	pcpup = &__pcpu[0];
+
+	/*
+	 * Set the pcpu pointer with a backup in tpidr_el1 to be
+	 * loaded when entering the kernel from userland.
+	 */
+	__asm __volatile(
+		"mov x18, %0\n"
+		"msr tpidr_el1, %0" :: "r"(pcpup));
 
 	_libkvmplat_newstack((uint64_t) _libkvmplat_cfg.bstack.end,
 				_libkvmplat_entry2, NULL);

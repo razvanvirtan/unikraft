@@ -33,8 +33,15 @@
 #ifndef __PLAT_CMN_SMP_H__
 #define __PLAT_CMN_SMP_H__
 
+#include <inttypes.h>
+struct pcpu {
+	uint32_t	pc_cpuid;	/* This cpu number */
+};
+
 #define	MAXCPU		8 /* hard limitation for CPU number */
 extern int cpu_possible_map[MAXCPU];
+struct pcpu __pcpu[MAXCPU];
+struct pcpu *pcpup = &__pcpu[0];
 
 void release_aps(void);
 void start_cpu(uint64_t target_cpu);
