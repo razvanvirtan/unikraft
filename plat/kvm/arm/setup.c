@@ -378,6 +378,23 @@ void init_secondary(uint64_t cpu)
 
 	if (smp_cpus == mp_ncpus)
 		smp_started = 1;
+
+	a = ukplat_memallocator_get();
+	if (a == NULL)
+		UK_CRASH("memallocator is not initialized\n");
+
+	s = uk_sched_default_init(a);
+	if (unlikely(!s))
+		UK_CRASH("Could not initialize the scheduler in APs\n");
+
+	/* Enable interrupts before starting the application */
+	ukplat_lcpu_enable_irq();
+
+	/* Enter the scheduler */
+	uk_sched_start(s);
+
+	UK_CRASH("scheduler returned us to init secondary");
+	/* NOTREACHED */
 }
 
 void start_cpu(uint64_t target_cpu)
