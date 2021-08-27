@@ -36,6 +36,8 @@
 #include <uk/asm.h>
 #include <kvm-arm/mm.h>
 #include <arm/cpu_defs.h>
+#include <uk/config.h>
+
 /*
  * The following is the Memory Layout of AArch64 Virtual Machine
  * | 0-0x7FFFFFF | 0x8000000-0x3FFFFFFF | 0x40000000-0x7FFFFFFFFF | 512GB-1TB |
@@ -268,6 +270,9 @@ ENTRY(start_mmu)
 	bfi x2, x3, #32, #3
 	msr tcr_el1, x2
 
+	cmp x7, #1
+	beq 1f
+
 	/* save lr */
 	mov x22, x30
 
@@ -296,7 +301,7 @@ ENTRY(start_mmu)
 
 	/* restore lr */
 	mov x30, x22
-
+1:
 	ret
 END(start_mmu)
 

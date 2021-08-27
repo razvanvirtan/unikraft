@@ -131,6 +131,7 @@ ENTRY(_libkvmplat_entry)
 	msr VBAR_EL1, x29
 
 	/* Enable the mmu */
+	mov x7, #0
 	bl start_mmu
 
 	/* Load dtb address to x0 as a parameter */
