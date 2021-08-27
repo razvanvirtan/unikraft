@@ -117,4 +117,9 @@ if LIBUKBOOT
 		bool "None"
 
 	endchoice
+
+	config SMP
+	bool "Support SMP"
+	default y
+	depends on ARCH_ARM_64
 endif
