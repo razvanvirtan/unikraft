@@ -40,6 +40,13 @@ smcc_psci_callfn_t smcc_psci_call;
 extern void _libkvmplat_newstack(uint64_t stack_start,
 			void (*tramp)(void *), void *arg);
 
+int psci_cpu_on(unsigned long cpu, unsigned long entry)
+{
+	/* PSCI v0.1 and v0.2 both support cpu_on. the parameter @cpu after
+	 * @entry will be passed as x0 for entry */
+	return smcc_psci_hvc_call(PSCI_FNID_CPU_ON, cpu, entry, cpu);
+}
+
 static void _init_dtb(void *dtb_pointer)
 {
 	int ret;
