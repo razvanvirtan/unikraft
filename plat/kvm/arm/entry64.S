@@ -149,3 +149,33 @@ ENTRY(_libkvmplat_newstack)
 	/* Branch to _libkvmplat_entry2 */
 	br x1
 END(_libkvmplat_newstack)
+
+/*
+ * mpentry(unsigned long)
+ *
+ * Called by a core when it is being brought online.
+ * The data in x0 is passed straight to init_secondary.
+ */
+ENTRY(mpentry)
+	/* Disable interrupts */
+	msr	daifset, #2
+
+	/* Set the context id */
+	msr	contextidr_el1, xzr
+
+	/* Enable the mmu */
+	mov x7, #1
+	bl	start_mmu
+
+	/* Jump to the virtual address space */
+	ldr	x15, =mp_virtdone
+	br	x15
+
+mp_virtdone:
+	ldr	x4, =secondary_stacks
+	mov	x5, #(4096 * 4)//TODO
+	mul	x5, x0, x5
+	add	sp, x4, x5
+
+	b	init_secondary
+END(mpentry)
