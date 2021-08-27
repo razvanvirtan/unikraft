@@ -39,6 +39,10 @@
 #include <stdio.h>
 #include <errno.h>
 
+#if CONFIG_SMP
+#include <uk/plat/smp.h>
+#endif
+
 #if CONFIG_LIBUKBOOT_INITBBUDDY
 #include <uk/allocbbuddy.h>
 #elif CONFIG_LIBUKBOOT_INITREGION
@@ -183,6 +187,7 @@ void ukplat_entry(int argc, char *argv[])
 	struct thread_main_arg tma;
 	int kern_args = 0;
 	int rc __maybe_unused = 0;
+	int i;
 #if CONFIG_LIBUKALLOC
 	struct uk_alloc *a = NULL;
 #endif
@@ -280,6 +285,17 @@ void ukplat_entry(int argc, char *argv[])
 
 	tma.argc = argc - kern_args;
 	tma.argv = &argv[kern_args];
+
+#if CONFIG_SMP
+	uk_pr_info("before starting cpus\n");
+
+	for (i = 1; i < MAXCPU; i++) {
+		if (cpu_possible_map[i] != -1)
+			start_cpu(cpu_possible_map[i]);
+	}
+
+	release_aps();
+#endif
 
 #if CONFIG_LIBUKSCHED
 	main_thread = uk_thread_create("main", main_thread_func, &tma);

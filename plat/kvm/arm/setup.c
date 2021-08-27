@@ -28,6 +28,28 @@
 #include <kvm/intctrl.h>
 #include <arm/cpu.h>
 #include <uk/arch/limits.h>
+#include <stdbool.h>
+#include <uk/plat/bootstrap.h>
+#include <uk/sched.h>
+
+#include <uk/plat/memory.h>
+#include <uk/plat/io.h>
+#include <uk/plat/lcpu.h>
+#include <arm/psci.h>
+#include <ofw/fdt.h>
+
+#ifdef CONFIG_SMP
+#include <uk/plat/smp.h>
+int aps_ready;
+int smp_started;
+int mp_ncpus;
+int smp_cpus = 1;	/* how many cpu's running */
+void mpentry(unsigned long cpu);
+uint8_t secondary_stacks[MAXCPU - 1][__PAGE_SIZE * 4];
+int cpu_possible_map[MAXCPU];
+static int cpu0 = -1;
+#endif
+
 
 struct kvmplat_config _libkvmplat_cfg = { 0 };
 
@@ -212,6 +234,171 @@ static void _libkvmplat_entry2(void *arg __attribute__((unused)))
 			  (char *)cmdline, strlen(cmdline));
 }
 
+static void _init_dtb_cpu(void)
+{
+	int fdt_cpu;
+	int naddr, nsizei, cell;
+	const fdt32_t *prop;
+	uint64_t core_id, index;
+	int subnode;
+	int i;
+
+	/* Init the cpu_possible_map */
+	for (i = 0; i < MAXCPU; i++)
+		cpu_possible_map[i] = -1;
+
+	/* Search for assigned VM cpus in DTB */
+	fdt_cpu = fdt_path_offset(_libkvmplat_cfg.dtb, "/cpus");
+	if (fdt_cpu < 0)
+		uk_pr_warn("cpus node is not found in device tree\n");
+
+	/* Get address,size cell */
+	prop = fdt_getprop(_libkvmplat_cfg.dtb, fdt_cpu, "#address-cells", &cell);
+	if (prop != NULL)
+		naddr = fdt32_to_cpu(prop[0]);
+	if (naddr < 0 || naddr >= FDT_MAX_NCELLS) {
+		UK_CRASH("Could not find cpu address!\n");
+		return;
+	}
+
+	/* Search all the cpu nodes in DTB */
+	index = 0;
+	fdt_for_each_subnode(subnode, _libkvmplat_cfg.dtb, fdt_cpu) {
+		const struct fdt_property *prop;
+		int prop_len = 0;
+
+		index++;
+
+		prop = fdt_get_property(_libkvmplat_cfg.dtb, subnode,
+						"enable-method", NULL);
+		if (!prop || strcmp(prop->data, "psci")) {
+			uk_pr_err("Only support psci method!(%s)\n",
+					prop->data);
+			return;
+		}
+
+		prop = fdt_get_property(_libkvmplat_cfg.dtb, subnode,
+						"device_type", &prop_len);
+		if (!prop)
+			continue;
+		if (prop_len < 4)
+			continue;
+		if (strcmp(prop->data, "cpu"))
+			continue;
+
+		prop = fdt_get_property(_libkvmplat_cfg.dtb, subnode,
+						"reg", &prop_len);
+		if (prop == NULL || prop_len <= 0) {
+			uk_pr_err("Error when searching reg property\n");
+			return;
+		}
+
+		core_id = fdt_reg_read_number((const fdt32_t *)prop->data,
+						naddr);
+		cpu_possible_map[index-1] = core_id;
+		mp_ncpus++;
+	}
+}
+
+static void ndelay(__u64 nsec)
+{
+       __nsec until = ukplat_monotonic_clock() + nsec;
+
+       while (until > ukplat_monotonic_clock())
+               ukplat_lcpu_halt_to(until);
+}
+
+static void mdelay(__u64 msec)
+{
+       ndelay(msec*1000*1000);
+}
+
+void release_aps(void)
+{
+	int i, started;
+
+	/* Only release CPUs if they exist */
+	if (mp_ncpus == 1)
+		return;
+
+	//TODO: make aps_ready atomic
+	aps_ready = 1;
+
+	/* Wake up the other CPUs */
+	__asm __volatile(
+		"dsb ishst	\n"
+		"sev		\n"
+		::: "memory");
+
+	uk_pr_info("Release APs...");
+
+	started = 0;
+	for (i = 0; i < 20000; i++) {
+		if (smp_started) {
+			uk_pr_info("done\n");
+			return;
+		}
+		/*
+		 * Don't time out while we are making progress. Some large
+		 * systems can take a while to start all CPUs.
+		 */
+		if (smp_cpus > started) {
+			i = 0;
+			started = smp_cpus;
+		}
+
+		uk_pr_info("sleep for a while\n");
+		mdelay(1);
+	}
+
+	uk_pr_err("APs not started\n");
+}
+
+void init_secondary(uint64_t cpu)
+{
+	struct uk_sched *s = NULL;
+	struct uk_alloc *a = NULL;
+
+	uk_pr_info("init secondary cpu=%lu\n", cpu);
+
+	/* Spin until the BSP releases the APs */
+	while (!aps_ready)
+		__asm __volatile("wfe");
+	uk_pr_info("after wfe cpu=%lu\n", cpu);
+
+	smp_cpus += 1;
+
+	if (smp_cpus == mp_ncpus)
+		smp_started = 1;
+}
+
+void start_cpu(uint64_t target_cpu)
+{
+
+	uint32_t pa;
+	int err;
+
+	/* Check we are able to start this cpu */
+	UK_ASSERT(target_cpu < MAXCPU);
+
+	uk_pr_info("Starting CPU %lu\n", target_cpu);
+
+	/* We are already running on cpu 0 */
+	if (target_cpu == (uint64_t)cpu0)
+		return;
+
+	pa = ukplat_virt_to_phys(mpentry);
+	err = psci_cpu_on(target_cpu, pa);
+	if (err != PSCI_RET_SUCCESS) {
+		mp_ncpus--;
+
+		/* Notify the user that the CPU failed to start */
+		uk_pr_info("Failed to start CPU (%lx)\n", target_cpu);
+	}
+
+	uk_pr_info("Starting CPU %lu successfully\n", target_cpu);
+}
+
 void _libkvmplat_start(void *dtb_pointer)
 {
 	_init_dtb(dtb_pointer);
@@ -237,6 +424,17 @@ void _libkvmplat_start(void *dtb_pointer)
 		   (void *) _libkvmplat_cfg.heap.start);
 	uk_pr_info("      stack top: %p\n",
 		   (void *) _libkvmplat_cfg.bstack.start);
+
+	_init_dtb_cpu();
+
+	if (cpu0 < 0) {
+		uint64_t mpidr_reg = SYSREG_READ32(mpidr_el1);
+
+		uk_pr_info("get mpidr_el1 0x%lx\n", mpidr_reg);
+
+		if ((mpidr_reg & 0xff00fffffful) == 0)
+			cpu0 = 0;
+	}
 
 	/*
 	 * Switch away from the bootstrap stack as early as possible.
