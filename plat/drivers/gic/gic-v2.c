@@ -61,6 +61,10 @@
 static uint64_t gic_dist_addr, gic_cpuif_addr;
 static uint64_t gic_dist_size, gic_cpuif_size;
 
+#ifdef CONFIG_HAVE_SMP
+static char gic_is_initialized;
+#endif
+
 #define GIC_DIST_REG(r)	((void *)(gic_dist_addr + (r)))
 #define GIC_CPU_REG(r)	((void *)(gic_cpuif_addr + (r)))
 #define IRQ_TYPE_MASK	0x0000000f
@@ -417,6 +421,17 @@ static void gic_init_cpuif(void)
 int _dtb_init_gic(const void *fdt)
 {
 	int fdt_gic, ret;
+
+#ifdef CONFIG_HAVE_SMP
+	if (gic_is_initialized) {
+		/* GIC is already initialized, we just need to initialize
+		 * the CPU interface
+		 */
+		gic_init_cpuif();
+		return 0;
+	}
+	gic_is_initialized = 1;
+#endif
 
 	uk_pr_info("Probing GICv2...\n");
 
