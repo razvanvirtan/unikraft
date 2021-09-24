@@ -21,6 +21,7 @@
 #include <uk/config.h>
 #include <libfdt.h>
 #include <uk/plat/common/sections.h>
+#include <uk/plat/lcpu.h>
 #include <kvm/console.h>
 #include <kvm/config.h>
 #include <uk/assert.h>
@@ -28,6 +29,9 @@
 #include <kvm/intctrl.h>
 #include <arm/cpu.h>
 #include <uk/arch/limits.h>
+#ifdef CONFIG_HAVE_SMP
+#include <kvm-arm/smp.h>
+#endif
 
 struct kvmplat_config _libkvmplat_cfg = { 0 };
 
@@ -208,6 +212,13 @@ static void _libkvmplat_entry2(void *arg __attribute__((unused)))
 void _libkvmplat_start(void *dtb_pointer)
 {
 	_init_dtb(dtb_pointer);
+
+#ifdef CONFIG_HAVE_SMP
+	int ret = smp_init();
+	if (ret < 0)
+		uk_pr_err("SMP init failed\n");
+#endif
+
 	_libkvmplat_init_console();
 
 	uk_pr_info("Entering from KVM (arm64)...\n");
