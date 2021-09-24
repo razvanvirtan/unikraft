@@ -35,18 +35,12 @@
 #define __UKPLAT_LCPU_H__
 
 #include <uk/arch/time.h>
+#include <uk/essentials.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#if UKPLAT_LCPU_MULTICORE
-__u8 ukplat_lcpu_id(void);
-__u8 ukplat_lcpu_count(void);
-#else
-#define ukplat_lcpu_id()    (0)
-#define ukplat_lcpu_count() (1)
-#endif
 
 /**
  * Enables interrupts
@@ -96,6 +90,63 @@ void ukplat_lcpu_halt_to(__snsec until);
  * Execution is returned when an interrupt/signal arrived
  */
 void ukplat_lcpu_halt_irq(void);
+
+#ifdef CONFIG_HAVE_SMP
+#include <uk/list.h>
+
+typedef void (*ukplat_lcpu_entry_t)(void) __noreturn;
+typedef __u32 __lcpuid;
+
+struct ukplat_lcpu_func {
+	struct uk_list_head lentry;
+	void (*fn)(struct __regs *regs, struct ukplat_lcpu_func *fn);
+	void *user;
+};
+
+/**
+ * Starts multiple logical CPUs
+ * @param lcpuid array with the ids of the cores that are to be started
+ * @param sp array of stack pointers - provide a stack for each core
+ * @param entry array of function pointers - the entry for each core
+ * @param num number of cores that are to be started
+ * @return number of cores that have started
+ */
+int ukplat_lcpu_start(__lcpuid lcpuid[], void *sp[],
+		      ukplat_lcpu_entry_t entry[], int num);
+
+/**
+ * Return the (physical) ID of the current logical CPU
+ */
+__lcpuid ukplat_lcpu_id(void);
+
+/**
+ * Return the number of logical CPUs present on the system
+ */
+__lcpuid ukplat_lcpu_count(void);
+
+/**
+ * Return whether the current logical CPU is the Bootstrapping one
+ */
+int ukplat_lcpu_is_bsp(void);
+
+/**
+ * Wait for the given lcpus to enter the "idle" state, or until the timeout
+ * expires. If lcpuid[] is NULL, wait for all the lcpus, except the current
+ * one.
+ * @return 1, if the timeout expired, 0 otherwise
+ */
+
+int ukplat_lcpu_wait(__lcpuid lcpuid[], int num, __nsec timeout);
+
+int ukplat_lcpu_run(__lcpuid lcpuid[], struct ukplat_lcpu_func *fn, int num,
+		    int flags);
+
+int ukplat_lcpu_wakeup(__lcpuid lcpuid[], int num);
+
+#else
+#define ukplat_lcpu_id() (0)
+#define ukplat_lcpu_count() (1)
+#endif /* CONFIG_HAVE_SMP */
 
 #ifdef __cplusplus
 }
