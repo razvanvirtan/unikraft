@@ -12,6 +12,15 @@ config EARLY_PRINT_PL011_UART_ADDR
 	help
 		Pl011 serial address used by early debug console.
 
+config HAVE_SMP
+	bool "Symmetric multi-processor support"
+	default n
+
+config MAX_CPUS
+	int
+	depends on HAVE_SMP
+	prompt "The maximum nuber of supported CPUs"
+
 endmenu
 
 config HZ
