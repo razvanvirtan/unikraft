@@ -40,6 +40,7 @@
 #include <uk/list.h>
 #include <uk/prio.h>
 #include <uk/essentials.h>
+#include <uk/spinlock.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -59,6 +60,8 @@ struct uk_thread {
 	struct ukarch_ectx *ectx;	/**< Extended context (FPU, VPU, ...) */
 	uintptr_t           tlsp;	/**< Current active TLS pointer */
 	__uptr            uktlsp;	/**< Unikraft TLS pointer */
+
+	struct uk_spinlock  lock;	/**< Lock to protect thread state */
 
 	UK_TAILQ_ENTRY(struct uk_thread) queue;
 	uint32_t flags;

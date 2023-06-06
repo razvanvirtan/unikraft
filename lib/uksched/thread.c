@@ -242,6 +242,8 @@ static void _uk_thread_struct_init(struct uk_thread *t,
 	t->priv = priv;
 	t->dtor = dtor;
 
+	uk_spin_init(&t->lock);
+
 	if (tlsp && is_uktls) {
 		t->flags |= UK_THREADF_UKTLS;
 		t->uktlsp = tlsp;
@@ -929,14 +931,14 @@ void uk_thread_block_until(struct uk_thread *thread, __snsec until)
 
 	UK_ASSERT(thread);
 
-	flags = ukplat_lcpu_save_irqf();
+	uk_spin_lock_irqsave(&thread->lock, flags);
 	thread->wakeup_time = until;
 	if (uk_thread_is_runnable(thread)) {
 		uk_thread_set_blocked(thread);
 		if (thread->sched)
 			uk_sched_thread_blocked(thread);
 	}
-	ukplat_lcpu_restore_irqf(flags);
+	uk_spin_unlock_irqrestore(&thread->lock, flags);
 }
 
 void uk_thread_block_timeout(struct uk_thread *thread, __nsec nsec)
@@ -959,12 +961,12 @@ void uk_thread_wake(struct uk_thread *thread)
 {
 	unsigned long flags;
 
-	flags = ukplat_lcpu_save_irqf();
+	uk_spin_lock_irqsave(&thread->lock, flags);
 	if (!uk_thread_is_runnable(thread)) {
 		uk_thread_set_runnable(thread);
 		if (thread->sched)
 			uk_sched_thread_woken(thread);
 	}
 	thread->wakeup_time = 0LL;
-	ukplat_lcpu_restore_irqf(flags);
+	uk_spin_unlock_irqrestore(&thread->lock, flags);
 }
