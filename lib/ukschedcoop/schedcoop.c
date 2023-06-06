@@ -252,7 +252,7 @@ struct uk_sched *uk_schedcoop_create(struct uk_alloc *a)
 	struct schedcoop *c = NULL;
 	int rc;
 
-	uk_pr_info("Initializing cooperative scheduler\n");
+	// uk_pr_info("Initializing cooperative scheduler\n");
 	c = uk_zalloc(a, sizeof(struct schedcoop));
 	if (!c)
 		goto err_out;
