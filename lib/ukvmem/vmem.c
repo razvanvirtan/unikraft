@@ -901,12 +901,14 @@ static int vmem_mapx_advise(struct uk_pagetable *pt,
 	/* With advise it can happen that we get calls for pages already
 	 * present. Just ignore these.
 	 */
+	uk_spin_lock(&pt->lock);
 	rc = ukarch_pte_read(pt_vaddr, level, PT_Lx_IDX(vaddr, level), &opte);
 	if (unlikely(rc))
 		return rc;
 
 	if (PT_Lx_PTE_PRESENT(opte, level))
 		return UKPLAT_PAGE_MAPX_ESKIP;
+	uk_spin_unlock(&pt->lock);
 
 	return vmem_mapx_populate(pt, vaddr, pt_vaddr, level, pte, user);
 }
