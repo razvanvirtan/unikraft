@@ -41,6 +41,7 @@
 #include <uk/arch/atomic.h>
 #include <uk/list.h>
 #include <uk/print.h>
+#include <uk/spinlock.h>
 
 #include <string.h>
 #include <errno.h>
@@ -113,6 +114,8 @@ struct bfa_zone {
 
 	struct bfa_zone *next;
 
+	struct uk_spinlock lock;
+
 #ifdef CONFIG_LIBUKFALLOCBUDDY_STATS
 	unsigned long nr_allocs[BFA_LEVELS][BFA_LEVELS]; /* from -> to */
 	unsigned long nr_frees[BFA_LEVELS][BFA_LEVELS]; /* from -> to */
@@ -165,6 +168,11 @@ struct buddy_framealloc {
 
 	struct uk_list_head free_list[BFA_LEVELS];
 	unsigned int free_list_map;
+
+	struct uk_spinlock free_list_lock;
+	unsigned int n_allocs, n_merges;
+	struct uk_spinlock merge_alloc_lock;
+	struct uk_spinlock free_lock;
 };
 
 /* Forward declarations */
@@ -332,7 +340,9 @@ static inline void bfa_zbit_alloc(struct bfa_zone *zone, __paddr_t paddr,
 
 	idx  = BFA_Lx_ZBIT_IDX(zone, paddr, level);
 	word = BFA_Lx_ZBIT_WORD(zone, level, idx);
+	uk_spin_lock(&zone->lock);
 	SET_BITS(*word, BFA_ZBIT_MASK(idx));
+	uk_spin_unlock(&zone->lock);
 }
 
 static inline void bfa_zbit_alloc_range(struct bfa_zone *zone, __paddr_t paddr,
@@ -375,6 +385,7 @@ static int bfa_zbit_free(struct bfa_zone *zone, __paddr_t paddr,
 	UK_ASSERT(BFA_Lx_ALIGNED(paddr, level));
 	UK_ASSERT(paddr >= zone->start && paddr < zone->end);
 
+
 	/* We can run into four cases for the original allocation(s) that
 	 * make(s) up the physical memory range to free:
 	 * 1) Same size -> this level set (no other level set)
@@ -384,8 +395,10 @@ static int bfa_zbit_free(struct bfa_zone *zone, __paddr_t paddr,
 	 */
 	rc = bfa_zbit_scan(zone, paddr, &lvl, BFA_LEVELS - 1, 1, 1);
 	if (rc) {
-		if (lvl == level)
+		if (lvl == level) {
+			uk_spin_unlock(&zone->lock);
 			return 0; /* same size (case 1) */
+		}
 
 		/* At this point, we know that we ran into case 2 and we have to
 		 * split the allocation into allocations of the requested size.
@@ -414,8 +427,9 @@ static int bfa_zbit_free(struct bfa_zone *zone, __paddr_t paddr,
 	/* We did not find an allocation of same or larger size. If we started
 	 * to search from the lowest level, then there is no allocation.
 	 */
-	if (level == 0)
+	if (level == 0) {
 		return -ENOMEM;
+	}
 
 	/* See if the allocation is made up from smaller allocations. This
 	 * happens if the continuous range of physical memory has been
@@ -527,6 +541,8 @@ static struct bfa_zone *bfa_zone_init(void *buffer, __paddr_t start, __sz len,
 
 		zn->bitmap[lvl] = zn->bitmap[lvl - 1] + bm_words;
 	} while (1);
+
+	uk_spin_init(&zn->lock);
 
 	return zn;
 }
@@ -928,6 +944,7 @@ static void bfa_fl_addmem(struct buddy_framealloc *bfa, struct bfa_zone *zone,
 		mb->zone = zone;
 #endif /* BFA_DIRECT_MAPPED */
 
+		uk_spin_lock(&bfa->free_list_lock);
 		if (unlikely(is_new)) {
 			uk_pr_debug("%"__PRIuptr": Adding physical memory "
 				    "%"__PRIpaddr" - %"__PRIpaddr
@@ -941,6 +958,7 @@ static void bfa_fl_addmem(struct buddy_framealloc *bfa, struct bfa_zone *zone,
 			bfa_fl_add_tail(bfa, mb);
 		} else
 			bfa_fl_add(bfa, mb);
+		uk_spin_unlock(&bfa->free_list_lock);
 
 		UK_ASSERT(len >= size);
 		UK_ASSERT(paddr <= (zone->end - size));
@@ -1122,15 +1140,30 @@ static int bfa_do_alloc_any(struct buddy_framealloc *bfa, __paddr_t *paddr,
 	if (unlikely(to_lvl >= BFA_LEVELS))
 		return -ENOMEM;
 
+	while (1) {
+		uk_spin_lock(&bfa->merge_alloc_lock);
+		if (bfa->n_merges == 0)
+			break;
+		uk_spin_unlock(&bfa->merge_alloc_lock);
+	}
+	bfa->n_allocs++;
+	uk_spin_unlock(&bfa->merge_alloc_lock);
+
 	/* Find a memory block that can satisfy the request. If we cannot find
 	 * a suitable block, there is not enough free contiguous memory.
 	 */
 	lvl = to_lvl;
+	uk_spin_lock(&bfa->free_list_lock);
 	mb = bfa_fl_pop_mb(bfa, &lvl, &zone);
+	uk_spin_unlock(&bfa->free_list_lock);
 	if (unlikely(!mb)) {
 		uk_pr_debug("%"__PRIuptr": Out of continuous physical memory"
 			    " (req: %"__PRIsz" free: %"__PRIsz")\n",
 			    (__uptr)bfa, len, bfa->fa.free_memory);
+
+		uk_spin_lock(&bfa->merge_alloc_lock);
+		bfa->n_allocs--;
+		uk_spin_unlock(&bfa->merge_alloc_lock);
 
 		return -ENOMEM;
 	}
@@ -1168,7 +1201,9 @@ static int bfa_do_alloc_any(struct buddy_framealloc *bfa, __paddr_t *paddr,
 			mb->zone = zone;
 #endif /* BFA_DIRECT_MAPPED */
 
+			uk_spin_lock(&bfa->free_list_lock);
 			bfa_fl_add(bfa, mb);
+			uk_spin_unlock(&bfa->free_list_lock);
 		}
 
 		UK_ASSERT(lvl == to_lvl);
@@ -1183,11 +1218,16 @@ static int bfa_do_alloc_any(struct buddy_framealloc *bfa, __paddr_t *paddr,
 		 * buddy system would waste this memory
 		 */
 		UK_ASSERT(mb_end_paddr > end);
+
 		bfa_fl_addmem(bfa, zone, end, mb_end_paddr - end, 0);
 
 		/* Mark the region as allocated */
 		bfa_zbit_alloc_range(zone, mb_paddr, len);
 	}
+
+	uk_spin_lock(&bfa->merge_alloc_lock);
+	bfa->n_allocs--;
+	uk_spin_unlock(&bfa->merge_alloc_lock);
 
 	return 0;
 }
@@ -1197,6 +1237,7 @@ static int bfa_alloc(struct uk_falloc *fa, __paddr_t *paddr,
 {
 	struct buddy_framealloc *bfa = (struct buddy_framealloc *)fa;
 	__sz len;
+	int rc;
 
 	UK_ASSERT(frames > 0);
 	UK_ASSERT(frames <= (__SZ_MAX / PAGE_SIZE));
@@ -1210,9 +1251,11 @@ static int bfa_alloc(struct uk_falloc *fa, __paddr_t *paddr,
 	 * exact memory range. Otherwise, just take a free one from the list.
 	 */
 	if (*paddr == __PADDR_ANY)
-		return bfa_do_alloc_any(bfa, paddr, len);
+		rc = bfa_do_alloc_any(bfa, paddr, len);
 	else
-		return bfa_do_alloc(bfa, *paddr, len);
+		rc = bfa_do_alloc(bfa, *paddr, len);
+	
+	return rc;
 }
 
 static int bfa_do_alloc_any_in_range(struct buddy_framealloc *bfa,
@@ -1305,6 +1348,15 @@ static struct bfa_memblock *bfa_try_merge(struct buddy_framealloc *bfa,
 	if ((BFA_LEVELS < 2) || (lvl >= BFA_LEVELS - 2))
 		return mb;
 
+	while (1) {
+		uk_spin_lock(&bfa->merge_alloc_lock);
+		if (bfa->n_allocs == 0)
+			break;
+		uk_spin_unlock(&bfa->merge_alloc_lock);
+	}
+	bfa->n_merges++;
+	uk_spin_unlock(&bfa->merge_alloc_lock);
+
 	/* Check if the memory block representing the buddy is allocated. If it
 	 * is free, we can probe the block for the level at which the buddy is
 	 * free and merge both buddies if they are on the same level. We repeat
@@ -1321,12 +1373,15 @@ static struct bfa_memblock *bfa_try_merge(struct buddy_framealloc *bfa,
 			break;
 
 		tmp_lvl = lvl;
-		if (bfa_zbit_scan(zone, buddy, &tmp_lvl, lvl, 0, -1))
+
+		if (bfa_zbit_scan(zone, buddy, &tmp_lvl, lvl, 0, -1)) {
+			uk_spin_unlock(&zone->lock);
 			break;
+		}
 
 		UK_ASSERT(tmp_lvl == lvl);
 		bmb = bfa_paddr_to_mb(zone, buddy);
-
+		
 		UK_ASSERT(bmb->level <= lvl);
 #ifdef BFA_DIRECT_MAPPED
 		UK_ASSERT(bmb->zone == zone);
@@ -1340,14 +1395,19 @@ static struct bfa_memblock *bfa_try_merge(struct buddy_framealloc *bfa,
 		 * representing the area at the next higher level (i.e., the
 		 * merged buddies).
 		 */
+		uk_spin_lock(&bfa->free_list_lock);
 		bfa_fl_del(bfa, bmb);
-
+		uk_spin_unlock(&bfa->free_list_lock);
 		++lvl;
 
 		paddr = BFA_Lx_ALIGN_DOWN(paddr, lvl);
 
 		mb = bfa_paddr_to_mb(zone, paddr);
 	} while (1);
+
+	uk_spin_lock(&bfa->merge_alloc_lock);
+	bfa->n_merges--;
+	uk_spin_unlock(&bfa->merge_alloc_lock);
 
 	*level = lvl;
 	return mb;
@@ -1369,12 +1429,19 @@ static int bfa_do_free(struct buddy_framealloc *bfa, __paddr_t paddr, __sz len)
 	UK_ASSERT(ukarch_paddr_range_isvalid(paddr, paddr + len));
 #endif /* CONFIG_PAGING */
 
+		uk_spin_lock(&bfa->free_lock);
+
 	/* The memory area might cross multiple buddies and zones */
 	do {
+
 		/* Find the zone that contains the physical address */
 		zone = bfa_paddr_to_zone(bfa, paddr);
-		if (unlikely(!zone))
+		if (unlikely(!zone)) {
+			uk_spin_unlock(&bfa->free_lock);
 			return -EFAULT;
+		}
+
+		uk_spin_lock(&zone->lock);
 
 		/* Find the maximum level that we can use to free an area */
 		lvl = bfa_largest_level(paddr, MIN(len, paddr - zone->end));
@@ -1388,8 +1455,11 @@ static int bfa_do_free(struct buddy_framealloc *bfa, __paddr_t paddr, __sz len)
 
 		/* Check if the range is actually allocated and free it */
 		rc = bfa_zbit_free(zone, paddr, lvl);
-		if (unlikely(rc))
+		if (unlikely(rc)) {
+			uk_spin_unlock(&zone->lock);
+			uk_spin_unlock(&bfa->free_lock);
 			return rc;
+		}
 
 		saved_lvl = lvl;
 
@@ -1402,15 +1472,22 @@ static int bfa_do_free(struct buddy_framealloc *bfa, __paddr_t paddr, __sz len)
 
 		UK_ASSERT(lvl >= saved_lvl);
 
+		uk_spin_lock(&bfa->free_list_lock);
 		bfa_fl_add(bfa, mb);
+		uk_spin_unlock(&bfa->free_list_lock);
 
 #ifdef CONFIG_LIBUKFALLOCBUDDY_STATS
 		zone->nr_frees[saved_lvl][lvl]++;
 #endif /* CONFIG_LIBUKFALLOCBUDDY_STATS */
 
+		uk_spin_unlock(&zone->lock);
+
+
 		len -= size;
 		paddr += size;
 	} while (len > 0);
+
+	uk_spin_unlock(&bfa->free_lock);
 
 	return 0;
 }
@@ -1420,6 +1497,7 @@ static int bfa_free(struct uk_falloc *fa, __paddr_t paddr,
 {
 	struct buddy_framealloc *bfa = (struct buddy_framealloc *)fa;
 	__sz len;
+	int rc;
 
 	if (unlikely(frames == 0))
 		return 0;
@@ -1428,7 +1506,9 @@ static int bfa_free(struct uk_falloc *fa, __paddr_t paddr,
 
 	len = frames * PAGE_SIZE;
 
-	return bfa_do_free(bfa, paddr, len);
+	rc = bfa_do_free(bfa, paddr, len);
+
+	return rc;
 }
 
 static int bfa_do_addmem(struct buddy_framealloc *bfa, void *metadata,
@@ -1490,6 +1570,12 @@ int uk_fallocbuddy_init(struct uk_falloc *fa)
 	bfa->free_list_map = 0;
 
 	bfa->zones = __NULL;
+
+	uk_spin_init(&bfa->free_list_lock);
+	bfa->n_allocs = 0;
+	bfa->n_merges = 0;
+	uk_spin_init(&bfa->merge_alloc_lock);
+	uk_spin_init(&bfa->free_lock);
 
 	return 0;
 }
