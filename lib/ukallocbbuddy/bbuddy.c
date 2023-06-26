@@ -97,6 +97,7 @@ struct uk_bbpalloc {
 	struct uk_bbpalloc_memr *memr_head;
 	uk_spinlock level_locks[FREELIST_SIZE];
 	uk_spinlock global_lock;
+	uk_spinlock global_lock2;
 };
 
 /*********************
@@ -143,16 +144,20 @@ static inline unsigned long allocated_in_map(struct uk_bbpalloc *b,
 	struct uk_bbpalloc_memr *memr = map_get_memr(b, page_va);
 	unsigned long page_idx;
 	unsigned long bm_idx, bm_off;
+	unsigned long status;
 
 	/* treat pages outside of region as allocated */
-	if (!memr)
+	if (!memr) {
 		return 1;
+	}
 
 	page_idx = (page_va - memr->first_page) >> __PAGE_SHIFT;
 	bm_idx = page_idx / PAGES_PER_MAPWORD;
 	bm_off = page_idx & (PAGES_PER_MAPWORD - 1);
 
-	return ((memr)->mm_alloc_bitmap[bm_idx] & (1UL << bm_off));
+	status = ((memr)->mm_alloc_bitmap[bm_idx] & (1UL << bm_off));
+
+	return status;
 }
 
 static void map_alloc(struct uk_bbpalloc *b, uintptr_t first_page,
@@ -180,6 +185,7 @@ static void map_alloc(struct uk_bbpalloc *b, uintptr_t first_page,
 	end_idx = end_page_idx / PAGES_PER_MAPWORD;
 	end_off = end_page_idx & (PAGES_PER_MAPWORD - 1);
 
+	uk_spin_lock(&b->global_lock);
 	if (curr_idx == end_idx) {
 		memr->mm_alloc_bitmap[curr_idx] |=
 		    ((1UL << end_off) - 1) & -(1UL << start_off);
@@ -189,6 +195,7 @@ static void map_alloc(struct uk_bbpalloc *b, uintptr_t first_page,
 			memr->mm_alloc_bitmap[curr_idx] = ~0UL;
 		memr->mm_alloc_bitmap[curr_idx] |= (1UL << end_off) - 1;
 	}
+	uk_spin_unlock(&b->global_lock);
 
 #ifdef CONFIG_HAVE_SMP
 	ukarch_fetch_sub(&b->nr_free_pages, nr_pages);
@@ -260,17 +267,18 @@ static int assign_physical_memory(chunk_head_t *chunk, int order)
 {
 	int rc = 0;
 
-	rc = uk_vma_advise(uk_vas_get_active(),
-		(unsigned long)chunk + __PAGE_SIZE,
-		__PAGE_SIZE * ((1ULL << order) - 1), UK_VMA_ADV_WILLNEED, 0);
-	if (unlikely(rc))
-		/* Release any memory that has been allocated */
-		uk_vma_advise(uk_vas_get_active(),
-			(unsigned long)chunk + __PAGE_SIZE,
-			__PAGE_SIZE * ((1ULL << order) - 1),
-			UK_VMA_ADV_DONTNEED, 0);
-	else
-		chunk->pallocated  = 1;
+	// rc = uk_vma_advise(uk_vas_get_active(),
+	// 	(unsigned long)chunk + __PAGE_SIZE,
+	// 	__PAGE_SIZE * ((1ULL << order) - 1), UK_VMA_ADV_WILLNEED, 0);
+
+	// if (unlikely(rc))
+	// 	/* Release any memory that has been allocated */
+	// 	uk_vma_advise(uk_vas_get_active(),
+	// 		(unsigned long)chunk + __PAGE_SIZE,
+	// 		__PAGE_SIZE * ((1ULL << order) - 1),
+	// 		UK_VMA_ADV_DONTNEED, 0);
+	// else
+	// 	chunk->pallocated  = 1;
 
 	return rc;
 }
@@ -279,11 +287,11 @@ static int release_physical_memory(chunk_head_t *chunk, int order)
 {
 	int rc = 0;
 
-	rc = uk_vma_advise(uk_vas_get_active(),
-		(unsigned long)chunk + __PAGE_SIZE,
-		__PAGE_SIZE * ((1ULL << order) - 1), UK_VMA_ADV_DONTNEED, 0);
-	if (likely(!rc))
-		chunk->pallocated = 0;
+	// rc = uk_vma_advise(uk_vas_get_active(),
+	// 	(unsigned long)chunk + __PAGE_SIZE,
+	// 	__PAGE_SIZE * ((1ULL << order) - 1), UK_VMA_ADV_DONTNEED, 0);
+	// if (likely(!rc))
+	// 	chunk->pallocated = 0;
 
 	return rc;
 }
@@ -382,6 +390,7 @@ static void bbuddy_pfree(struct uk_alloc *a, void *obj, unsigned long num_pages)
 	chunk_head_t *freed_ch, *to_merge_ch, *old_freed_ch;
 	chunk_tail_t *freed_ct;
 	unsigned long mask;
+	unsigned int checked_level;
 
 	UK_ASSERT(a != NULL);
 
@@ -389,12 +398,22 @@ static void bbuddy_pfree(struct uk_alloc *a, void *obj, unsigned long num_pages)
 	b = (struct uk_bbpalloc *)&a->priv;
 
 	size_t order = (size_t)num_pages_to_order(num_pages);
+	size_t start_order = order;
+	size_t end_order = order;
+
+	// uk_spin_lock(&b->global_lock2);
+
+	uk_spin_lock(&b->level_locks[start_order]);
 
 	/* if the object is not page aligned it was clearly not from us */
+	// uk_pr_info("F %x\n", obj);
 	UK_ASSERT((((uintptr_t)obj) & (__PAGE_SIZE - 1)) == 0);
 
 	/* First free the chunk */
+	uk_spin_lock(&b->global_lock);
 	map_free(b, (uintptr_t)obj, 1UL << order);
+	((chunk_head_t *)obj)->level = order;
+	uk_spin_unlock(&b->global_lock);
 
 	/* Create free chunk */
 	freed_ch = old_freed_ch = (chunk_head_t *)obj;
@@ -403,22 +422,32 @@ static void bbuddy_pfree(struct uk_alloc *a, void *obj, unsigned long num_pages)
 
 	/* Now, possibly we can conseal chunks together */
 	while (order < FREELIST_SIZE) {
-		uk_spin_lock(&b->level_locks[order]);
-
 		mask = 1UL << (order + __PAGE_SHIFT);
 		if ((unsigned long)freed_ch & mask) {
 			to_merge_ch = (chunk_head_t *)((char *)freed_ch - mask);
+			uk_spin_lock(&b->global_lock);
+			checked_level = to_merge_ch->level;
 			if (allocated_in_map(b, (uintptr_t)to_merge_ch)
-			    || to_merge_ch->level != order)
+			    || checked_level != order) {
+				uk_spin_unlock(&b->global_lock);
 				break;
+			}
+			uk_spin_unlock(&b->global_lock);
+			
 
 			/* Merge with predecessor */
 			freed_ch = to_merge_ch;
 		} else {
 			to_merge_ch = (chunk_head_t *)((char *)freed_ch + mask);
+			uk_spin_lock(&b->global_lock);
+			checked_level = to_merge_ch->level;
 			if (allocated_in_map(b, (uintptr_t)to_merge_ch)
-			    || to_merge_ch->level != order)
+			    || checked_level != order) {
+				uk_spin_unlock(&b->global_lock);
 				break;
+			}
+			uk_spin_unlock(&b->global_lock);
+			
 
 			/* Merge with successor */
 			freed_ct =
@@ -446,9 +475,10 @@ static void bbuddy_pfree(struct uk_alloc *a, void *obj, unsigned long num_pages)
 
 		old_freed_ch = freed_ch;
 
-		uk_spin_unlock(&b->level_locks[order]);
-
 		order++;
+		end_order = order;
+
+		uk_spin_lock(&b->level_locks[order]);
 	}
 
 	/* Release an un-merged block that is over the threshold */
@@ -470,7 +500,10 @@ static void bbuddy_pfree(struct uk_alloc *a, void *obj, unsigned long num_pages)
 	 * discovered in the loop above, by breaking when it was reached.
 	 * Therefore, it hasn't been unlocked yet, so we need to unlock it now.
 	 */
-	uk_spin_unlock(&b->level_locks[order]);
+	for (int i = start_order; i <= end_order; i++)
+		uk_spin_unlock(&b->level_locks[i]);
+
+	// uk_spin_unlock(&b->global_lock2);
 }
 
 static long bbuddy_pmaxalloc(struct uk_alloc *a)
@@ -553,6 +586,7 @@ static int bbuddy_addmem(struct uk_alloc *a, void *base, size_t len)
 	 * where: bitmap_size = page_num / BITS_PER_BYTE
 	 *
 	 */
+	uk_spin_lock(&b->global_lock);
 	memr->nr_pages = range >> __PAGE_SHIFT;
 	memr->mm_alloc_bitmap = (unsigned long *) (min + sizeof(*memr));
 	memr_size = round_pgup(sizeof(*memr) +
@@ -568,17 +602,17 @@ static int bbuddy_addmem(struct uk_alloc *a, void *base, size_t len)
 	 */
 	memr->first_page = min;
 	/* add to list */
-	uk_spin_lock(&b->global_lock);
 	memr->next = b->memr_head;
 	b->memr_head = memr;
-	uk_spin_unlock(&b->global_lock);
 
 	/* All allocated by default. */
 	memset(memr->mm_alloc_bitmap, (unsigned char) ~0,
 			memr->mm_alloc_bitmap_size);
+	uk_spin_unlock(&b->global_lock);
 
 	/* free up the memory we've been given to play with */
 	map_free(b, min, memr->nr_pages);
+
 
 	count = 0;
 	while (range != 0) {
@@ -652,6 +686,7 @@ struct uk_alloc *uk_allocbbuddy_init(void *base, size_t len)
 		uk_spin_init(&b->level_locks[i]);
 	}
 	uk_spin_init(&b->global_lock);
+	uk_spin_init(&b->global_lock2);
 	b->memr_head = NULL;
 
 	/* initialize and register allocator interface */

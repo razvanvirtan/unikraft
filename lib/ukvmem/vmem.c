@@ -1104,6 +1104,8 @@ int vmem_pagefault(__vaddr_t vaddr, unsigned int type, struct __regs *regs)
 	vas = uk_vas_get_active();
 	if (unlikely(!vas || vas->flags & UK_VAS_FLAG_NO_PAGING))
 		return -EFAULT;
+	
+	vas->n_faults++;
 
 	/* If the page fault was caused by an access to a region not covered by
 	 * a virtual memory area, fail early.

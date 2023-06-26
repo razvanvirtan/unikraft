@@ -197,6 +197,7 @@ void uk_free_ifpages(struct uk_alloc *a, void *ptr)
 
 	UK_ASSERT(metadata->base != __NULL);
 	UK_ASSERT(metadata->num_pages != 0);
+
 	uk_pfree(a, metadata->base, metadata->num_pages);
 
 #ifdef CONFIG_HAVE_MEMTAG

@@ -278,6 +278,7 @@ static inline void _uk_alloc_stats_count_free(struct uk_alloc_stats *stats,
 				      ? uk_alloc_maxalloc_ifpages : NULL; \
 		(a)->addmem         = (addmem_func);			\
 									\
+		uk_spin_init(&a->lock); \
 		uk_alloc_stats_reset((a));				\
 		uk_alloc_register((a));					\
 	} while (0)

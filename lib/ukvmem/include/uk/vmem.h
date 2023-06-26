@@ -78,6 +78,7 @@ struct uk_vas {
 	struct uk_spinlock split_lock;
 
 	struct uk_rwlock vma_list_lock;
+	int n_faults;
 };
 
 /**

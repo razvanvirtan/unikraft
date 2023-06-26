@@ -39,6 +39,7 @@
 #include <uk/assert.h>
 #include <uk/essentials.h>
 #include <errno.h>
+#include <uk/spinlock.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -118,6 +119,8 @@ struct uk_alloc {
 
 	/* internal */
 	struct uk_alloc *next;
+	struct uk_spinlock lock;
+
 	__u8 priv[];
 };
 
